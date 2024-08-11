@@ -90,6 +90,7 @@
 #include "f_qc_rndis.c"
 #include "u_ether.c"
 #include "u_qc_ether.c"
+#include "f_hid.c"
 #ifdef CONFIG_TARGET_CORE
 #include "f_tcm.c"
 #endif
@@ -156,6 +157,9 @@ struct android_dev {
 	struct android_usb_function **functions;
 	struct usb_composite_dev *cdev;
 	struct device *dev;
+
+	void (*setup_complete)(struct usb_ep *ep,
+				struct usb_request *req);
 
 	bool enabled;
 	int disable_depth;
@@ -399,12 +403,23 @@ static void ffs_function_enable(struct android_usb_function *f)
 {
 	struct android_dev *dev = f->android_dev;
 	struct functionfs_config *config = f->config;
+	int ret = 0;
 
 	config->enabled = true;
 
 	/* Disable the gadget until the function is ready */
-	if (!config->opened)
+	if (!config->opened) {
 		android_disable(dev);
+	} else {
+		/*
+		 * Call functionfs_bind to handle the case where userspace
+		 * passed descriptors before updating enabled functions list
+		 */
+		ret = functionfs_bind(config->data, dev->cdev);
+		if (ret)
+			pr_err("%s: functionfs_bind failed (%d)\n", __func__,
+									ret);
+	}
 }
 
 static void ffs_function_disable(struct android_usb_function *f)
@@ -513,7 +528,7 @@ static void functionfs_closed_callback(struct ffs_data *ffs)
 
 	mutex_lock(&dev->mutex);
 
-	if (config->enabled)
+	if (config->enabled && dev)
 		android_disable(dev);
 
 	config->opened = false;
@@ -918,6 +933,29 @@ static struct android_usb_function mbim_function = {
 	.init		= mbim_function_init,
 };
 
+static int hid_function_init(struct android_usb_function *f,
+				 struct usb_composite_dev *cdev)
+{
+	return ghid_setup(cdev->gadget, 2);
+}
+
+static void hid_function_cleanup(struct android_usb_function *f)
+{
+	ghid_cleanup();
+}
+
+static int hid_function_bind_config(struct android_usb_function *f,
+					struct usb_configuration *c)
+{
+	return hidg_bind_config(c, NULL, 0);
+}
+
+static struct android_usb_function hid_function = {
+	.name		= "hid",
+	.init		= hid_function_init,
+	.cleanup	= hid_function_cleanup,
+	.bind_config	= hid_function_bind_config,
+};
 
 /* DIAG */
 static char diag_clients[32];	    /*enabled DIAG clients- "diag[,diag_mdm]" */
@@ -2357,6 +2395,7 @@ static struct android_usb_function *supported_functions[] = {
 	&mass_storage_function,
 	&cdrom_function,
 	&accessory_function,
+	&hid_function,
 	&audio_source_function,
 	&midi_function,
 	&uasp_function,
@@ -2951,7 +2990,10 @@ static int android_bind(struct usb_composite_dev *cdev)
 	dev = list_entry(android_dev_list.prev, struct android_dev, list_item);
 
 	dev->cdev = cdev;
-
+	
+	/* Save the default handler */
+	dev->setup_complete = cdev->req->complete;
+	
 	/*
 	 * Start disconnected. Userspace will connect the gadget once
 	 * it is done configuring the functions.
@@ -3038,10 +3080,12 @@ android_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *c)
 	struct android_configuration	*conf;
 	int value = -EOPNOTSUPP;
 	unsigned long flags;
+	bool do_work = false;
 
 	req->zero = 0;
 	req->complete = composite_setup_complete;
 	req->length = 0;
+	req->complete = dev->setup_complete;
 	gadget->ep0->driver_data = cdev;
 
 	list_for_each_entry(conf, &dev->configs, list_item)
@@ -3071,12 +3115,15 @@ android_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *c)
 	spin_lock_irqsave(&cdev->lock, flags);
 	if (!dev->connected) {
 		dev->connected = 1;
-		schedule_work(&dev->work);
+		do_work = true;
 	} else if (c->bRequest == USB_REQ_SET_CONFIGURATION &&
 						cdev->config) {
-		schedule_work(&dev->work);
+		do_work = true;
 	}
 	spin_unlock_irqrestore(&cdev->lock, flags);
+
+	if (do_work)
+		schedule_work(&dev->work);
 
 	return value;
 }
