@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Userland implementation of gettimeofday() for 32 bits processes in a
  * ppc64 kernel for use in the vDSO
  *
  * Copyright (C) 2004 Benjamin Herrenschmuidt (benh@kernel.crashing.org,
  *                    IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <asm/processor.h>
 #include <asm/ppc_asm.h>
@@ -98,7 +94,7 @@ V_FUNCTION_BEGIN(__kernel_clock_gettime)
 	 * can be used, r7 contains NSEC_PER_SEC.
 	 */
 
-	lwz	r5,WTOM_CLOCK_SEC(r9)
+	lwz	r5,(WTOM_CLOCK_SEC+LOPART)(r9)
 	lwz	r6,WTOM_CLOCK_NSEC(r9)
 
 	/* We now have our offset in r5,r6. We create a fake dependency
@@ -139,6 +135,7 @@ V_FUNCTION_BEGIN(__kernel_clock_gettime)
 	 */
 99:
 	li	r0,__NR_clock_gettime
+  .cfi_restore lr
 	sc
 	blr
   .cfi_endproc
@@ -159,12 +156,15 @@ V_FUNCTION_BEGIN(__kernel_clock_getres)
 	cror	cr0*4+eq,cr0*4+eq,cr1*4+eq
 	bne	cr0,99f
 
+	mflr	r12
+  .cfi_register lr,r12
+	bl	__get_datapage@local	/* get data page */
+	lwz	r5, CLOCK_HRTIMER_RES(r3)
+	mtlr	r12
 	li	r3,0
 	cmpli	cr0,r4,0
 	crclr	cr0*4+so
 	beqlr
-	lis	r5,CLOCK_REALTIME_RES@h
-	ori	r5,r5,CLOCK_REALTIME_RES@l
 	stw	r3,TSPC32_TV_SEC(r4)
 	stw	r5,TSPC32_TV_NSEC(r4)
 	blr
@@ -179,6 +179,32 @@ V_FUNCTION_BEGIN(__kernel_clock_getres)
   .cfi_endproc
 V_FUNCTION_END(__kernel_clock_getres)
 
+
+/*
+ * Exact prototype of time()
+ *
+ * time_t time(time *t);
+ *
+ */
+V_FUNCTION_BEGIN(__kernel_time)
+  .cfi_startproc
+	mflr	r12
+  .cfi_register lr,r12
+
+	mr	r11,r3			/* r11 holds t */
+	bl	__get_datapage@local
+	mr	r9, r3			/* datapage ptr in r9 */
+
+	lwz	r3,STAMP_XTIME+TSPEC_TV_SEC(r9)
+
+	cmplwi	r11,0			/* check if t is NULL */
+	beq	2f
+	stw	r3,0(r11)		/* store result at *t */
+2:	mtlr	r12
+	crclr	cr0*4+so
+	blr
+  .cfi_endproc
+V_FUNCTION_END(__kernel_time)
 
 /*
  * This is the core of clock_gettime() and gettimeofday(),
@@ -206,9 +232,9 @@ __do_get_tspec:
 	lwz	r6,(CFG_TB_ORIG_STAMP+4)(r9)
 
 	/* Get a stable TB value */
-2:	mftbu	r3
-	mftbl	r4
-	mftbu	r0
+2:	MFTBU(r3)
+	MFTBL(r4)
+	MFTBU(r0)
 	cmplw	cr0,r3,r0
 	bne-	2b
 

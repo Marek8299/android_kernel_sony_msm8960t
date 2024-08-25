@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2003, 2004, 2007  Maciej W. Rozycki
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
+#include <linux/context_tracking.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
@@ -27,7 +24,8 @@ static char r4kwar[] __initdata =
 static char daddiwar[] __initdata =
 	"Enable CPU_DADDI_WORKAROUNDS to rectify.";
 
-static inline void align_mod(const int align, const int mod)
+static __always_inline __init
+void align_mod(const int align, const int mod)
 {
 	asm volatile(
 		".set	push\n\t"
@@ -38,11 +36,12 @@ static inline void align_mod(const int align, const int mod)
 		".endr\n\t"
 		".set	pop"
 		:
-		: GCC_IMM_ASM() (align), GCC_IMM_ASM() (mod));
+		: "n"(align), "n"(mod));
 }
 
-static inline void mult_sh_align_mod(long *v1, long *v2, long *w,
-				     const int align, const int mod)
+static __always_inline __init
+void mult_sh_align_mod(long *v1, long *v2, long *w,
+		       const int align, const int mod)
 {
 	unsigned long flags;
 	int m1, m2;
@@ -84,14 +83,14 @@ static inline void mult_sh_align_mod(long *v1, long *v2, long *w,
 		".set	noreorder\n\t"
 		".set	nomacro\n\t"
 		"mult	%2, %3\n\t"
-		"dsll32	%0, %4, %5\n\t"
+		"dsll32 %0, %4, %5\n\t"
 		"mflo	$0\n\t"
-		"dsll32	%1, %4, %5\n\t"
+		"dsll32 %1, %4, %5\n\t"
 		"nop\n\t"
 		".set	pop"
 		: "=&r" (lv1), "=r" (lw)
 		: "r" (m1), "r" (m2), "r" (s), "I" (0)
-		: "hi", "lo", GCC_REG_ACCUM);
+		: "hi", "lo", "$0");
 	/* We have to use single integers for m1 and m2 and a double
 	 * one for p to be sure the mulsidi3 gcc's RTL multiplication
 	 * instruction has the workaround applied.  Older versions of
@@ -116,7 +115,7 @@ static inline void mult_sh_align_mod(long *v1, long *v2, long *w,
 	*w = lw;
 }
 
-static inline void check_mult_sh(void)
+static __always_inline __init void check_mult_sh(void)
 {
 	long v1[8], v2[8], w[8];
 	int bug, fix, i;
@@ -147,11 +146,11 @@ static inline void check_mult_sh(void)
 			bug = 1;
 
 	if (bug == 0) {
-		printk("no.\n");
+		pr_cont("no.\n");
 		return;
 	}
 
-	printk("yes, workaround... ");
+	pr_cont("yes, workaround... ");
 
 	fix = 1;
 	for (i = 0; i < 8; i++)
@@ -159,23 +158,27 @@ static inline void check_mult_sh(void)
 			fix = 0;
 
 	if (fix == 1) {
-		printk("yes.\n");
+		pr_cont("yes.\n");
 		return;
 	}
 
-	printk("no.\n");
+	pr_cont("no.\n");
 	panic(bug64hit, !R4000_WAR ? r4kwar : nowar);
 }
 
-static volatile int daddi_ov __cpuinitdata;
+static volatile int daddi_ov;
 
 asmlinkage void __init do_daddi_ov(struct pt_regs *regs)
 {
+	enum ctx_state prev_state;
+
+	prev_state = exception_enter();
 	daddi_ov = 1;
 	regs->cp0_epc += 4;
+	exception_exit(prev_state);
 }
 
-static inline void check_daddi(void)
+static __init void check_daddi(void)
 {
 	extern asmlinkage void handle_daddi_ov(void);
 	unsigned long flags;
@@ -185,7 +188,7 @@ static inline void check_daddi(void)
 	printk("Checking for the daddi bug... ");
 
 	local_irq_save(flags);
-	handler = set_except_vector(12, handle_daddi_ov);
+	handler = set_except_vector(EXCCODE_OV, handle_daddi_ov);
 	/*
 	 * The following code fails to trigger an overflow exception
 	 * when executed on R4000 rev. 2.2 or 3.0 (PRId 00000422 or
@@ -209,39 +212,39 @@ static inline void check_daddi(void)
 		".set	pop"
 		: "=r" (v), "=&r" (tmp)
 		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
-	set_except_vector(12, handler);
+	set_except_vector(EXCCODE_OV, handler);
 	local_irq_restore(flags);
 
 	if (daddi_ov) {
-		printk("no.\n");
+		pr_cont("no.\n");
 		return;
 	}
 
-	printk("yes, workaround... ");
+	pr_cont("yes, workaround... ");
 
 	local_irq_save(flags);
-	handler = set_except_vector(12, handle_daddi_ov);
+	handler = set_except_vector(EXCCODE_OV, handle_daddi_ov);
 	asm volatile(
 		"addiu	%1, $0, %2\n\t"
 		"dsrl	%1, %1, 1\n\t"
 		"daddi	%0, %1, %3"
 		: "=r" (v), "=&r" (tmp)
 		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
-	set_except_vector(12, handler);
+	set_except_vector(EXCCODE_OV, handler);
 	local_irq_restore(flags);
 
 	if (daddi_ov) {
-		printk("yes.\n");
+		pr_cont("yes.\n");
 		return;
 	}
 
-	printk("no.\n");
+	pr_cont("no.\n");
 	panic(bug64hit, !DADDI_WAR ? daddiwar : nowar);
 }
 
-int daddiu_bug  = -1;
+int daddiu_bug	= IS_ENABLED(CONFIG_CPU_MIPSR6) ? 0 : -1;
 
-static inline void check_daddiu(void)
+static __init void check_daddiu(void)
 {
 	long v, w, tmp;
 
@@ -273,7 +276,7 @@ static inline void check_daddiu(void)
 #ifdef HAVE_AS_SET_DADDI
 		".set	daddi\n\t"
 #endif
-		"daddiu	%0, %2, %4\n\t"
+		"daddiu %0, %2, %4\n\t"
 		"addiu	%1, $0, %4\n\t"
 		"daddu	%1, %2\n\t"
 		".set	pop"
@@ -283,37 +286,40 @@ static inline void check_daddiu(void)
 	daddiu_bug = v != w;
 
 	if (!daddiu_bug) {
-		printk("no.\n");
+		pr_cont("no.\n");
 		return;
 	}
 
-	printk("yes, workaround... ");
+	pr_cont("yes, workaround... ");
 
 	asm volatile(
 		"addiu	%2, $0, %3\n\t"
 		"dsrl	%2, %2, 1\n\t"
-		"daddiu	%0, %2, %4\n\t"
+		"daddiu %0, %2, %4\n\t"
 		"addiu	%1, $0, %4\n\t"
 		"daddu	%1, %2"
 		: "=&r" (v), "=&r" (w), "=&r" (tmp)
 		: "I" (0xffffffffffffdb9aUL), "I" (0x1234));
 
 	if (v == w) {
-		printk("yes.\n");
+		pr_cont("yes.\n");
 		return;
 	}
 
-	printk("no.\n");
+	pr_cont("no.\n");
 	panic(bug64hit, !DADDI_WAR ? daddiwar : nowar);
 }
 
 void __init check_bugs64_early(void)
 {
-	check_mult_sh();
-	check_daddiu();
+	if (!IS_ENABLED(CONFIG_CPU_MIPSR6)) {
+		check_mult_sh();
+		check_daddiu();
+	}
 }
 
 void __init check_bugs64(void)
 {
-	check_daddi();
+	if (!IS_ENABLED(CONFIG_CPU_MIPSR6))
+		check_daddi();
 }

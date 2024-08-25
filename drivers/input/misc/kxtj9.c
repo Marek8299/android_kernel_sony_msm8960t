@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 Kionix, Inc.
  * Written by Chris Hudson <chudson@kionix.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
- * 02111-1307, USA
  */
 
 #include <linux/delay.h>
@@ -295,7 +282,7 @@ static void kxtj9_input_close(struct input_dev *dev)
 	kxtj9_disable(tj9);
 }
 
-static void __devinit kxtj9_init_input_device(struct kxtj9_data *tj9,
+static void kxtj9_init_input_device(struct kxtj9_data *tj9,
 					      struct input_dev *input_dev)
 {
 	__set_bit(EV_ABS, input_dev->evbit);
@@ -308,7 +295,7 @@ static void __devinit kxtj9_init_input_device(struct kxtj9_data *tj9,
 	input_dev->dev.parent = &tj9->client->dev;
 }
 
-static int __devinit kxtj9_setup_input_device(struct kxtj9_data *tj9)
+static int kxtj9_setup_input_device(struct kxtj9_data *tj9)
 {
 	struct input_dev *input_dev;
 	int err;
@@ -433,7 +420,7 @@ static void kxtj9_polled_input_close(struct input_polled_dev *dev)
 	kxtj9_disable(tj9);
 }
 
-static int __devinit kxtj9_setup_polled_device(struct kxtj9_data *tj9)
+static int kxtj9_setup_polled_device(struct kxtj9_data *tj9)
 {
 	int err;
 	struct input_polled_dev *poll_dev;
@@ -466,7 +453,7 @@ static int __devinit kxtj9_setup_polled_device(struct kxtj9_data *tj9)
 	return 0;
 }
 
-static void __devexit kxtj9_teardown_polled_device(struct kxtj9_data *tj9)
+static void kxtj9_teardown_polled_device(struct kxtj9_data *tj9)
 {
 	input_unregister_polled_device(tj9->poll_dev);
 	input_free_polled_device(tj9->poll_dev);
@@ -485,7 +472,7 @@ static inline void kxtj9_teardown_polled_device(struct kxtj9_data *tj9)
 
 #endif
 
-static int __devinit kxtj9_verify(struct kxtj9_data *tj9)
+static int kxtj9_verify(struct kxtj9_data *tj9)
 {
 	int retval;
 
@@ -506,10 +493,11 @@ out:
 	return retval;
 }
 
-static int __devinit kxtj9_probe(struct i2c_client *client,
+static int kxtj9_probe(struct i2c_client *client,
 				 const struct i2c_device_id *id)
 {
-	const struct kxtj9_platform_data *pdata = client->dev.platform_data;
+	const struct kxtj9_platform_data *pdata =
+			dev_get_platdata(&client->dev);
 	struct kxtj9_data *tj9;
 	int err;
 
@@ -594,7 +582,7 @@ err_free_mem:
 	return err;
 }
 
-static int __devexit kxtj9_remove(struct i2c_client *client)
+static int kxtj9_remove(struct i2c_client *client)
 {
 	struct kxtj9_data *tj9 = i2c_get_clientdata(client);
 
@@ -614,8 +602,7 @@ static int __devexit kxtj9_remove(struct i2c_client *client)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
-static int kxtj9_suspend(struct device *dev)
+static int __maybe_unused kxtj9_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct kxtj9_data *tj9 = i2c_get_clientdata(client);
@@ -630,12 +617,11 @@ static int kxtj9_suspend(struct device *dev)
 	return 0;
 }
 
-static int kxtj9_resume(struct device *dev)
+static int __maybe_unused kxtj9_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct kxtj9_data *tj9 = i2c_get_clientdata(client);
 	struct input_dev *input_dev = tj9->input_dev;
-	int retval = 0;
 
 	mutex_lock(&input_dev->mutex);
 
@@ -643,9 +629,8 @@ static int kxtj9_resume(struct device *dev)
 		kxtj9_enable(tj9);
 
 	mutex_unlock(&input_dev->mutex);
-	return retval;
+	return 0;
 }
-#endif
 
 static SIMPLE_DEV_PM_OPS(kxtj9_pm_ops, kxtj9_suspend, kxtj9_resume);
 
@@ -659,11 +644,10 @@ MODULE_DEVICE_TABLE(i2c, kxtj9_id);
 static struct i2c_driver kxtj9_driver = {
 	.driver = {
 		.name	= NAME,
-		.owner	= THIS_MODULE,
 		.pm	= &kxtj9_pm_ops,
 	},
 	.probe		= kxtj9_probe,
-	.remove		= __devexit_p(kxtj9_remove),
+	.remove		= kxtj9_remove,
 	.id_table	= kxtj9_id,
 };
 

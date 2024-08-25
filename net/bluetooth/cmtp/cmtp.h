@@ -26,7 +26,7 @@
 #include <linux/types.h>
 #include <net/bluetooth/bluetooth.h>
 
-#define BTNAMSIZ 18
+#define BTNAMSIZ 21
 
 /* CMTP ioctl defines */
 #define CMTPCONNADD	_IOW('C', 200, int)
@@ -81,6 +81,7 @@ struct cmtp_session {
 
 	char name[BTNAMSIZ];
 
+	atomic_t terminate;
 	struct task_struct *task;
 
 	wait_queue_head_t wait;

@@ -1,123 +1,141 @@
-/*
- * include/linux/random.h
- *
- * Include file for the random number generator.
- */
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef _LINUX_RANDOM_H
 #define _LINUX_RANDOM_H
 
-#include <linux/types.h>
-#include <linux/ioctl.h>
-#include <linux/irqnr.h>
+#include <linux/bug.h>
+#include <linux/kernel.h>
+#include <linux/list.h>
+#include <linux/once.h>
 
-/* ioctl()'s for the random number generator */
+#include <uapi/linux/random.h>
 
-/* Get the entropy count. */
-#define RNDGETENTCNT	_IOR( 'R', 0x00, int )
+struct notifier_block;
 
-/* Add to (or subtract from) the entropy count.  (Superuser only.) */
-#define RNDADDTOENTCNT	_IOW( 'R', 0x01, int )
+void add_device_randomness(const void *buf, unsigned int len);
+void __init add_bootloader_randomness(const void *buf, size_t len);
+void add_input_randomness(unsigned int type, unsigned int code,
+			  unsigned int value) __latent_entropy;
+void add_interrupt_randomness(int irq) __latent_entropy;
+void add_hwgenerator_randomness(const void *buf, size_t len, size_t entropy);
 
-/* Get the contents of the entropy pool.  (Superuser only.) */
-#define RNDGETPOOL	_IOR( 'R', 0x02, int [2] )
+static inline void add_latent_entropy(void)
+{
+#if defined(LATENT_ENTROPY_PLUGIN) && !defined(__CHECKER__)
+	add_device_randomness((const void *)&latent_entropy, sizeof(latent_entropy));
+#else
+	add_device_randomness(NULL, 0);
+#endif
+}
 
-/* 
- * Write bytes into the entropy pool and add to the entropy count.
- * (Superuser only.)
- */
-#define RNDADDENTROPY	_IOW( 'R', 0x03, int [2] )
-
-/* Clear entropy count to 0.  (Superuser only.) */
-#define RNDZAPENTCNT	_IO( 'R', 0x04 )
-
-/* Clear the entropy pool and associated counters.  (Superuser only.) */
-#define RNDCLEARPOOL	_IO( 'R', 0x06 )
-
-struct rand_pool_info {
-	int	entropy_count;
-	int	buf_size;
-	__u32	buf[0];
-};
-
-struct rnd_state {
-	__u32 s1, s2, s3;
-};
-
-/* Exported functions */
+void get_random_bytes(void *buf, int len);
+size_t __must_check get_random_bytes_arch(void *buf, size_t len);
+u32 get_random_u32(void);
+u64 get_random_u64(void);
+static inline unsigned int get_random_int(void)
+{
+	return get_random_u32();
+}
+static inline unsigned long get_random_long(void)
+{
+#if BITS_PER_LONG == 64
+	return get_random_u64();
+#else
+	return get_random_u32();
+#endif
+}
 
 /*
- * Flags for getrandom(2)
- *
- * GRND_NONBLOCK	Don't block and return EAGAIN instead
- * GRND_RANDOM		Use the /dev/random pool instead of /dev/urandom
+ * On 64-bit architectures, protect against non-terminated C string overflows
+ * by zeroing out the first byte of the canary; this leaves 56 bits of entropy.
  */
-#define GRND_NONBLOCK	0x0001
-#define GRND_RANDOM	0x0002
-
-#ifdef __KERNEL__
-
-extern void add_device_randomness(const void *, unsigned int);
-extern void add_input_randomness(unsigned int type, unsigned int code,
-				 unsigned int value);
-extern void add_interrupt_randomness(int irq, int irq_flags);
-
-extern void get_random_bytes(void *buf, int nbytes);
-extern void get_random_bytes_arch(void *buf, int nbytes);
-void generate_random_uuid(unsigned char uuid_out[16]);
-extern int random_int_secret_init(void);
-
-#ifndef MODULE
-extern const struct file_operations random_fops, urandom_fops;
+#ifdef CONFIG_64BIT
+# ifdef __LITTLE_ENDIAN
+#  define CANARY_MASK 0xffffffffffffff00UL
+# else /* big endian, 64 bits: */
+#  define CANARY_MASK 0x00ffffffffffffffUL
+# endif
+#else /* 32 bits: */
+# define CANARY_MASK 0xffffffffUL
 #endif
 
-unsigned int get_random_int(void);
-unsigned long get_random_long(void);
-unsigned long randomize_range(unsigned long start, unsigned long end, unsigned long len);
+static inline unsigned long get_random_canary(void)
+{
+	return get_random_long() & CANARY_MASK;
+}
 
-u32 prandom_u32(void);
-void prandom_bytes(void *buf, int nbytes);
-void prandom_seed(u32 seed);
-void prandom_reseed_late(void);
+int __init random_init(const char *command_line);
+bool rng_is_initialized(void);
+int wait_for_random_bytes(void);
+int register_random_ready_notifier(struct notifier_block *nb);
+int unregister_random_ready_notifier(struct notifier_block *nb);
 
-u32 prandom_u32_state(struct rnd_state *);
-void prandom_bytes_state(struct rnd_state *state, void *buf, int nbytes);
+/* Calls wait_for_random_bytes() and then calls get_random_bytes(buf, nbytes).
+ * Returns the result of the call to wait_for_random_bytes. */
+static inline int get_random_bytes_wait(void *buf, size_t nbytes)
+{
+	int ret = wait_for_random_bytes();
+	get_random_bytes(buf, nbytes);
+	return ret;
+}
+
+#define declare_get_random_var_wait(name, ret_type) \
+	static inline int get_random_ ## name ## _wait(ret_type *out) { \
+		int ret = wait_for_random_bytes(); \
+		if (unlikely(ret)) \
+			return ret; \
+		*out = get_random_ ## name(); \
+		return 0; \
+	}
+declare_get_random_var_wait(u32, u32)
+declare_get_random_var_wait(u64, u32)
+declare_get_random_var_wait(int, unsigned int)
+declare_get_random_var_wait(long, unsigned long)
+#undef declare_get_random_var
 
 /*
- * Handle minimum values for seeds
+ * This is designed to be standalone for just prandom
+ * users, but for now we include it from <linux/random.h>
+ * for legacy reasons.
  */
-static inline u32 __seed(u32 x, u32 m)
-{
-	return (x < m) ? x + m : x;
-}
-
-/**
- * prandom_seed_state - set seed for prandom_u32_state().
- * @state: pointer to state structure to receive the seed.
- * @seed: arbitrary 64-bit value to use as a seed.
- */
-static inline void prandom_seed_state(struct rnd_state *state, u64 seed)
-{
-	u32 i = (seed >> 32) ^ (seed << 10) ^ seed;
-
-	state->s1 = __seed(i, 2);
-	state->s2 = __seed(i, 8);
-	state->s3 = __seed(i, 16);
-}
+#include <linux/prandom.h>
 
 #ifdef CONFIG_ARCH_RANDOM
 # include <asm/archrandom.h>
 #else
-static inline int arch_get_random_long(unsigned long *v)
+static inline bool __must_check arch_get_random_long(unsigned long *v) { return false; }
+static inline bool __must_check arch_get_random_int(unsigned int *v) { return false; }
+static inline bool __must_check arch_get_random_seed_long(unsigned long *v) { return false; }
+static inline bool __must_check arch_get_random_seed_int(unsigned int *v) { return false; }
+#endif
+
+/*
+ * Called from the boot CPU during startup; not valid to call once
+ * secondary CPUs are up and preemption is possible.
+ */
+#ifndef arch_get_random_seed_long_early
+static inline bool __init arch_get_random_seed_long_early(unsigned long *v)
 {
-	return 0;
-}
-static inline int arch_get_random_int(unsigned int *v)
-{
-	return 0;
+	WARN_ON(system_state != SYSTEM_BOOTING);
+	return arch_get_random_seed_long(v);
 }
 #endif
 
-#endif /* __KERNEL___ */
+#ifndef arch_get_random_long_early
+static inline bool __init arch_get_random_long_early(unsigned long *v)
+{
+	WARN_ON(system_state != SYSTEM_BOOTING);
+	return arch_get_random_long(v);
+}
+#endif
+
+#ifdef CONFIG_SMP
+int random_prepare_cpu(unsigned int cpu);
+int random_online_cpu(unsigned int cpu);
+#endif
+
+#ifndef MODULE
+extern const struct file_operations random_fops, urandom_fops;
+#endif
 
 #endif /* _LINUX_RANDOM_H */

@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Sample kfifo int type implementation
  *
  * Copyright (C) 2010 Stefani Seibold <stefani@seibold.net>
- *
- * Released under the GPL version 2 only.
- *
  */
 
 #include <linux/init.h>
@@ -61,7 +59,7 @@ static int __init testfunc(void)
 
 	/* put values into the fifo */
 	for (i = 0; i != 10; i++)
-		kfifo_put(&test, &i);
+		kfifo_put(&test, i);
 
 	/* show the number of used elements */
 	printk(KERN_INFO "fifo len: %u\n", kfifo_len(&test));
@@ -78,7 +76,7 @@ static int __init testfunc(void)
 	kfifo_skip(&test);
 
 	/* put values into the fifo until is full */
-	for (i = 20; kfifo_put(&test, &i); i++)
+	for (i = 20; kfifo_put(&test, i); i++)
 		;
 
 	printk(KERN_INFO "queue len: %u\n", kfifo_len(&test));
@@ -117,8 +115,10 @@ static ssize_t fifo_write(struct file *file, const char __user *buf,
 	ret = kfifo_from_user(&test, buf, count, &copied);
 
 	mutex_unlock(&write_lock);
+	if (ret)
+		return ret;
 
-	return ret ? ret : copied;
+	return copied;
 }
 
 static ssize_t fifo_read(struct file *file, char __user *buf,
@@ -133,8 +133,10 @@ static ssize_t fifo_read(struct file *file, char __user *buf,
 	ret = kfifo_to_user(&test, buf, count, &copied);
 
 	mutex_unlock(&read_lock);
+	if (ret)
+		return ret;
 
-	return ret ? ret : copied;
+	return copied;
 }
 
 static const struct file_operations fifo_fops = {

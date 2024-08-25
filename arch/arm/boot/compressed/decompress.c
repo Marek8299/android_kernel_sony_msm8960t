@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #define _LINUX_STRING_H_
 
 #include <linux/compiler.h>	/* for inline */
@@ -5,15 +6,10 @@
 #include <linux/stddef.h>	/* for NULL */
 #include <linux/linkage.h>
 #include <asm/string.h>
-
-extern unsigned long free_mem_ptr;
-extern unsigned long free_mem_end_ptr;
-extern void error(char *);
+#include "misc.h"
 
 #define STATIC static
 #define STATIC_RW_DATA	/* non-static please */
-
-#define ARCH_HAS_DECOMP_WDOG
 
 /* Diagnostic functions */
 #ifdef DEBUG
@@ -51,7 +47,10 @@ extern char * strchrnul(const char *, int);
 #endif
 
 #ifdef CONFIG_KERNEL_XZ
+/* Prevent KASAN override of string helpers in decompressor */
+#undef memmove
 #define memmove memmove
+#undef memcpy
 #define memcpy memcpy
 #include "../../../../lib/decompress_unxz.c"
 #endif
@@ -62,5 +61,5 @@ extern char * strchrnul(const char *, int);
 
 int do_decompress(u8 *input, int len, u8 *output, void (*error)(char *x))
 {
-	return decompress(input, len, NULL, NULL, output, NULL, error);
+	return __decompress(input, len, NULL, NULL, output, 0, NULL, error);
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * PCI Backend Common Data Structures & Function Declarations
  *
@@ -13,6 +14,7 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
+#include <xen/events.h>
 #include <xen/interface/io/pciif.h>
 
 #define DRV_NAME	"xen-pciback"
@@ -26,6 +28,8 @@ struct pci_dev_entry {
 #define PDEVF_op_active		(1<<(_PDEVF_op_active))
 #define _PCIB_op_pending	(1)
 #define PCIB_op_pending		(1<<(_PCIB_op_pending))
+#define _EOI_pending		(2)
+#define EOI_pending		(1<<(_EOI_pending))
 
 struct xen_pcibk_device {
 	void *pci_dev_data;
@@ -55,7 +59,6 @@ struct xen_pcibk_dev_data {
 
 /* Used by XenBus and xen_pcibk_ops.c */
 extern wait_queue_head_t xen_pcibk_aer_wait_queue;
-extern struct workqueue_struct *xen_pcibk_wq;
 /* Used by pcistub.c and conf_space_quirks.c */
 extern struct list_head xen_pcibk_quirks;
 
@@ -100,7 +103,8 @@ struct xen_pcibk_backend {
 		    unsigned int *domain, unsigned int *bus,
 		    unsigned int *devfn);
 	int (*publish)(struct xen_pcibk_device *pdev, publish_pci_root_cb cb);
-	void (*release)(struct xen_pcibk_device *pdev, struct pci_dev *dev);
+	void (*release)(struct xen_pcibk_device *pdev, struct pci_dev *dev,
+                        bool lock);
 	int (*add)(struct xen_pcibk_device *pdev, struct pci_dev *dev,
 		   int devid, publish_pci_dev_cb publish_cb);
 	struct pci_dev *(*get)(struct xen_pcibk_device *pdev,
@@ -123,10 +127,10 @@ static inline int xen_pcibk_add_pci_dev(struct xen_pcibk_device *pdev,
 }
 
 static inline void xen_pcibk_release_pci_dev(struct xen_pcibk_device *pdev,
-					     struct pci_dev *dev)
+					     struct pci_dev *dev, bool lock)
 {
-	if (xen_pcibk_backend && xen_pcibk_backend->free)
-		return xen_pcibk_backend->release(pdev, dev);
+	if (xen_pcibk_backend && xen_pcibk_backend->release)
+		return xen_pcibk_backend->release(pdev, dev, lock);
 }
 
 static inline struct pci_dev *
@@ -181,12 +185,17 @@ static inline void xen_pcibk_release_devices(struct xen_pcibk_device *pdev)
 irqreturn_t xen_pcibk_handle_event(int irq, void *dev_id);
 void xen_pcibk_do_op(struct work_struct *data);
 
+static inline void xen_pcibk_lateeoi(struct xen_pcibk_device *pdev,
+				     unsigned int eoi_flag)
+{
+	if (test_and_clear_bit(_EOI_pending, &pdev->flags))
+		xen_irq_lateeoi(pdev->evtchn_irq, eoi_flag);
+}
+
 int xen_pcibk_xenbus_register(void);
 void xen_pcibk_xenbus_unregister(void);
 
 extern int verbose_request;
-
-void xen_pcibk_test_and_schedule_op(struct xen_pcibk_device *pdev);
 #endif
 
 /* Handles shared IRQs that can to device domain and control domain. */

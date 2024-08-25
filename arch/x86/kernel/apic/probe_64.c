@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2004 James Cleverdon, IBM.
- * Subject to the GNU Public License, v.2
  *
  * Generic APIC sub-arch probe layer.
  *
@@ -8,25 +8,9 @@
  * Martin Bligh, Andi Kleen, James Bottomley, John Stultz, and
  * James Cleverdon.
  */
-#include <linux/threads.h>
-#include <linux/cpumask.h>
-#include <linux/string.h>
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/ctype.h>
-#include <linux/init.h>
-#include <linux/hardirq.h>
-#include <linux/dmar.h>
-
-#include <asm/smp.h>
 #include <asm/apic.h>
-#include <asm/ipi.h>
-#include <asm/setup.h>
 
-static int apicid_phys_pkg_id(int initial_apic_id, int index_msb)
-{
-	return hard_smp_processor_id() >> index_msb;
-}
+#include "local.h"
 
 /*
  * Check the APIC IDs in bios_cpu_apicid and choose the APIC mode.
@@ -48,17 +32,8 @@ void __init default_setup_apic_routing(void)
 		}
 	}
 
-	if (is_vsmp_box()) {
-		/* need to update phys_pkg_id */
-		apic->phys_pkg_id = apicid_phys_pkg_id;
-	}
-}
-
-/* Same for both flat and physical. */
-
-void apic_send_IPI_self(int vector)
-{
-	__default_send_IPI_shortcut(APIC_DEST_SELF, vector, APIC_DEST_PHYSICAL);
+	if (x86_platform.apic_post_init)
+		x86_platform.apic_post_init();
 }
 
 int __init default_acpi_madt_oem_check(char *oem_id, char *oem_table_id)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Copyright (C) 1995-1996  Linus Torvalds & author (see below)
  */
@@ -107,7 +108,7 @@ static void umc_set_speeds(u8 speeds[])
 static void umc_set_pio_mode(ide_hwif_t *hwif, ide_drive_t *drive)
 {
 	ide_hwif_t *mate = hwif->mate;
-	unsigned long uninitialized_var(flags);
+	unsigned long flags;
 	const u8 pio = drive->pio_mode - XFER_PIO_0;
 
 	printk("%s: setting umc8672 to PIO mode%d (speed %d)\n",
@@ -128,7 +129,7 @@ static const struct ide_port_ops umc8672_port_ops = {
 	.set_pio_mode		= umc_set_pio_mode,
 };
 
-static const struct ide_port_info umc8672_port_info __initdata = {
+static const struct ide_port_info umc8672_port_info __initconst = {
 	.name			= DRV_NAME,
 	.chipset		= ide_umc8672,
 	.port_ops		= &umc8672_port_ops,

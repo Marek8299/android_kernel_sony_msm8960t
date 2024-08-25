@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AT and PS/2 keyboard driver
  *
  * Copyright (c) 1999-2002 Vojtech Pavlik
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 /*
  * This driver can handle standard AT keyboards and PS/2 keyboards in
@@ -243,6 +239,12 @@ static void (*atkbd_platform_fixup)(struct atkbd *, const void *data);
 static void *atkbd_platform_fixup_data;
 static unsigned int (*atkbd_platform_scancode_fixup)(struct atkbd *, unsigned int);
 
+/*
+ * Certain keyboards to not like ATKBD_CMD_RESET_DIS and stop responding
+ * to many commands until full reset (ATKBD_CMD_RESET_BAT) is performed.
+ */
+static bool atkbd_skip_deactivate;
+
 static ssize_t atkbd_attr_show_helper(struct device *dev, char *buf,
 				ssize_t (*handler)(struct atkbd *, char *));
 static ssize_t atkbd_attr_set_helper(struct device *dev, const char *buf, size_t count,
@@ -395,6 +397,8 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 		if  (ps2_handle_response(&atkbd->ps2dev, data))
 			goto out;
 
+	pm_wakeup_event(&serio->dev, 0);
+
 	if (!atkbd->enabled)
 		goto out;
 
@@ -433,7 +437,7 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 		if (printk_ratelimit())
 			dev_warn(&serio->dev,
 				 "Spurious %s on %s. "
-				 "Some program might be trying access hardware directly.\n",
+				 "Some program might be trying to access hardware directly.\n",
 				 data == ATKBD_RET_ACK ? "ACK" : "NAK", serio->phys);
 		goto out;
 	case ATKBD_RET_ERR:
@@ -450,8 +454,9 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 
 	keycode = atkbd->keycode[code];
 
-	if (keycode != ATKBD_KEY_NULL)
-		input_event(dev, EV_MSC, MSC_SCAN, code);
+	if (!(atkbd->release && test_bit(code, atkbd->force_release_mask)))
+		if (keycode != ATKBD_KEY_NULL)
+			input_event(dev, EV_MSC, MSC_SCAN, code);
 
 	switch (keycode) {
 	case ATKBD_KEY_NULL:
@@ -505,6 +510,7 @@ static irqreturn_t atkbd_interrupt(struct serio *serio, unsigned char data,
 		input_sync(dev);
 
 		if (value && test_bit(code, atkbd->force_release_mask)) {
+			input_event(dev, EV_MSC, MSC_SCAN, code);
 			input_report_key(dev, keycode, 0);
 			input_sync(dev);
 		}
@@ -676,6 +682,77 @@ static inline void atkbd_disable(struct atkbd *atkbd)
 	serio_continue_rx(atkbd->ps2dev.serio);
 }
 
+static int atkbd_activate(struct atkbd *atkbd)
+{
+	struct ps2dev *ps2dev = &atkbd->ps2dev;
+
+/*
+ * Enable the keyboard to receive keystrokes.
+ */
+
+	if (ps2_command(ps2dev, NULL, ATKBD_CMD_ENABLE)) {
+		dev_err(&ps2dev->serio->dev,
+			"Failed to enable keyboard on %s\n",
+			ps2dev->serio->phys);
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * atkbd_deactivate() resets and disables the keyboard from sending
+ * keystrokes.
+ */
+
+static void atkbd_deactivate(struct atkbd *atkbd)
+{
+	struct ps2dev *ps2dev = &atkbd->ps2dev;
+
+	if (ps2_command(ps2dev, NULL, ATKBD_CMD_RESET_DIS))
+		dev_err(&ps2dev->serio->dev,
+			"Failed to deactivate keyboard on %s\n",
+			ps2dev->serio->phys);
+}
+
+#ifdef CONFIG_X86
+static bool atkbd_is_portable_device(void)
+{
+	static const char * const chassis_types[] = {
+		"8",	/* Portable */
+		"9",	/* Laptop */
+		"10",	/* Notebook */
+		"14",	/* Sub-Notebook */
+		"31",	/* Convertible */
+		"32",	/* Detachable */
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(chassis_types); i++)
+		if (dmi_match(DMI_CHASSIS_TYPE, chassis_types[i]))
+			return true;
+
+	return false;
+}
+
+/*
+ * On many modern laptops ATKBD_CMD_GETID may cause problems, on these laptops
+ * the controller is always in translated mode. In this mode mice/touchpads will
+ * not work. So in this case simply assume a keyboard is connected to avoid
+ * confusing some laptop keyboards.
+ *
+ * Skipping ATKBD_CMD_GETID ends up using a fake keyboard id. Using the standard
+ * 0xab83 id is ok in translated mode, only atkbd_select_set() checks atkbd->id
+ * and in translated mode that is a no-op.
+ */
+static bool atkbd_skip_getid(struct atkbd *atkbd)
+{
+	return atkbd->translated && atkbd_is_portable_device();
+}
+#else
+static inline bool atkbd_skip_getid(struct atkbd *atkbd) { return false; }
+#endif
+
 /*
  * atkbd_probe() probes for an AT keyboard on a serio port.
  */
@@ -697,6 +774,11 @@ static int atkbd_probe(struct atkbd *atkbd)
 				 "keyboard reset failed on %s\n",
 				 ps2dev->serio->phys);
 
+	if (atkbd_skip_getid(atkbd)) {
+		atkbd->id = 0xab83;
+		return 0;
+	}
+
 /*
  * Then we check the keyboard ID. We should get 0xab83 under normal conditions.
  * Some keyboards report different values, but the first byte is always 0xab or
@@ -708,9 +790,9 @@ static int atkbd_probe(struct atkbd *atkbd)
 	if (ps2_command(ps2dev, param, ATKBD_CMD_GETID)) {
 
 /*
- * If the get ID command failed, we check if we can at least set the LEDs on
- * the keyboard. This should work on every keyboard out there. It also turns
- * the LEDs off, which we want anyway.
+ * If the get ID command failed, we check if we can at least set
+ * the LEDs on the keyboard. This should work on every keyboard out there.
+ * It also turns the LEDs off, which we want anyway.
  */
 		param[0] = 0;
 		if (ps2_command(ps2dev, param, ATKBD_CMD_SETLEDS))
@@ -726,10 +808,17 @@ static int atkbd_probe(struct atkbd *atkbd)
 
 	if (atkbd->id == 0xaca1 && atkbd->translated) {
 		dev_err(&ps2dev->serio->dev,
-			"NCD terminal keyboards are only supported on non-translating controlelrs. "
+			"NCD terminal keyboards are only supported on non-translating controllers. "
 			"Use i8042.direct=1 to disable translation.\n");
 		return -1;
 	}
+
+/*
+ * Make sure nothing is coming from the keyboard and disturbs our
+ * internal state.
+ */
+	if (!atkbd_skip_deactivate)
+		atkbd_deactivate(atkbd);
 
 	return 0;
 }
@@ -793,7 +882,7 @@ static int atkbd_select_set(struct atkbd *atkbd, int target_set, int allow_extra
 	if (param[0] != 3) {
 		param[0] = 2;
 		if (ps2_command(ps2dev, param, ATKBD_CMD_SSCANSET))
-		return 2;
+			return 2;
 	}
 
 	ps2_command(ps2dev, param, ATKBD_CMD_SETALL_MBR);
@@ -821,24 +910,6 @@ static int atkbd_reset_state(struct atkbd *atkbd)
 	param[0] = 0;
 	if (ps2_command(ps2dev, param, ATKBD_CMD_SETREP))
 		return -1;
-
-	return 0;
-}
-
-static int atkbd_activate(struct atkbd *atkbd)
-{
-	struct ps2dev *ps2dev = &atkbd->ps2dev;
-
-/*
- * Enable the keyboard to receive keystrokes.
- */
-
-	if (ps2_command(ps2dev, NULL, ATKBD_CMD_ENABLE)) {
-		dev_err(&ps2dev->serio->dev,
-			"Failed to enable keyboard on %s\n",
-			ps2dev->serio->phys);
-		return -1;
-	}
 
 	return 0;
 }
@@ -1150,7 +1221,6 @@ static int atkbd_connect(struct serio *serio, struct serio_driver *drv)
 
 		atkbd->set = atkbd_select_set(atkbd, atkbd_set, atkbd_extra);
 		atkbd_reset_state(atkbd);
-		atkbd_activate(atkbd);
 
 	} else {
 		atkbd->set = 2;
@@ -1165,6 +1235,8 @@ static int atkbd_connect(struct serio *serio, struct serio_driver *drv)
 		goto fail3;
 
 	atkbd_enable(atkbd);
+	if (serio->write)
+		atkbd_activate(atkbd);
 
 	err = input_register_device(atkbd->dev);
 	if (err)
@@ -1208,8 +1280,6 @@ static int atkbd_reconnect(struct serio *serio)
 		if (atkbd->set != atkbd_select_set(atkbd, atkbd->set, atkbd->extra))
 			goto out;
 
-		atkbd_activate(atkbd);
-
 		/*
 		 * Restore LED state and repeat rate. While input core
 		 * will do this for us at resume time reconnect may happen
@@ -1223,7 +1293,17 @@ static int atkbd_reconnect(struct serio *serio)
 
 	}
 
+	/*
+	 * Reset our state machine in case reconnect happened in the middle
+	 * of multi-byte scancode.
+	 */
+	atkbd->xl_bit = 0;
+	atkbd->emul = 0;
+
 	atkbd_enable(atkbd);
+	if (atkbd->write)
+		atkbd_activate(atkbd);
+
 	retval = 0;
 
  out:
@@ -1231,7 +1311,7 @@ static int atkbd_reconnect(struct serio *serio)
 	return retval;
 }
 
-static struct serio_device_id atkbd_serio_ids[] = {
+static const struct serio_device_id atkbd_serio_ids[] = {
 	{
 		.type	= SERIO_8042,
 		.proto	= SERIO_ANY,
@@ -1360,8 +1440,8 @@ static ssize_t atkbd_set_extra(struct atkbd *atkbd, const char *buf, size_t coun
 
 static ssize_t atkbd_show_force_release(struct atkbd *atkbd, char *buf)
 {
-	size_t len = bitmap_scnlistprintf(buf, PAGE_SIZE - 2,
-			atkbd->force_release_mask, ATKBD_KEYMAP_SIZE);
+	size_t len = scnprintf(buf, PAGE_SIZE - 1, "%*pbl",
+			       ATKBD_KEYMAP_SIZE, atkbd->force_release_mask);
 
 	buf[len++] = '\n';
 	buf[len] = '\0';
@@ -1608,6 +1688,18 @@ static int __init atkbd_setup_scancode_fixup(const struct dmi_system_id *id)
 	return 1;
 }
 
+static int __init atkbd_deactivate_fixup(const struct dmi_system_id *id)
+{
+	atkbd_skip_deactivate = true;
+	return 1;
+}
+
+/*
+ * NOTE: do not add any more "force release" quirks to this table.  The
+ * task of adjusting list of keys that should be "released" automatically
+ * by the driver is now delegated to userspace tools, such as udev, so
+ * submit such quirks there.
+ */
 static const struct dmi_system_id atkbd_dmi_quirk_table[] __initconst = {
 	{
 		.matches = {
@@ -1744,6 +1836,12 @@ static const struct dmi_system_id atkbd_dmi_quirk_table[] __initconst = {
 		},
 		.callback = atkbd_setup_scancode_fixup,
 		.driver_data = atkbd_oqo_01plus_scancode_fixup,
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LG Electronics"),
+		},
+		.callback = atkbd_deactivate_fixup,
 	},
 	{ }
 };
